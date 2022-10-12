@@ -15,7 +15,7 @@ var (
 	chatId    = os.Getenv("CHAT_ID")
 	userEmail = os.Getenv("USER_EMAIL")
 	// userId    = os.Getenv("USER_ID")
-	interval  = os.Getenv("INTERVAL")  //minutes
+	interval = os.Getenv("INTERVAL") //minutes
 )
 
 func main() {
@@ -46,9 +46,13 @@ func main() {
 	}
 
 	//根据邮箱获取 user_id
-	userId, err := getUserIdByEmail()
+	userId, err := getUserIdByEmail(token)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
 
-	//发送加急消息
+	// 发送加急消息
 	err = callPhone(historyMessagesID, userId, token)
 	if err != nil {
 		fmt.Println(err)
@@ -101,9 +105,9 @@ func getHistoryMessage(chatId, authToken string, pageToken ...string) (string, e
 	// fmt.Println(startTime, endTime)
 	var url string
 	if len(pageToken) == 0 {
-		url = "https://open.feishu.cn/open-apis/im/v1/messages?container_id=" + chatId + "&container_id_type=chat&end_time="+endTime+"&page_size=50&start_time="+startTime
+		url = "https://open.feishu.cn/open-apis/im/v1/messages?container_id=" + chatId + "&container_id_type=chat&end_time=" + endTime + "&page_size=50&start_time=" + startTime
 	} else {
-		url = "https://open.feishu.cn/open-apis/im/v1/messages?container_id=" + chatId + "&container_id_type=chat&page_size=50&page_token=" + pageToken[0] + "&end_time=" +endTime+ "&start_time=" +startTime
+		url = "https://open.feishu.cn/open-apis/im/v1/messages?container_id=" + chatId + "&container_id_type=chat&page_size=50&page_token=" + pageToken[0] + "&end_time=" + endTime + "&start_time=" + startTime
 	}
 
 	method := "GET"
@@ -218,18 +222,17 @@ func checkMessageStatus(messageId, authToken string) (bool, error) {
 	return true, nil
 }
 
-func getUserIdByEmail() (string, error) {
+func getUserIdByEmail(authToken string) (string, error) {
 	url := "https://open.feishu.cn/open-apis/contact/v3/users/batch_get_id?user_id_type=user_id"
 	method := "POST"
 	payload := strings.NewReader("{\"emails\": [\"" + userEmail + "\"]}")
-	client := &http.Client {
-	}
+	client := &http.Client{}
 	req, err := http.NewRequest(method, url, payload)
 	if err != nil {
 		return "", err
 	}
 	req.Header.Add("Content-Type", "application/json")
-	req.Header.Add("Authorization", "Bearer t-g104acjfESUALMRB6W37XE6V3YJVWKAKDBWQ4NJ7")
+	req.Header.Add("Authorization", "Bearer "+authToken)
 	res, err := client.Do(req)
 	if err != nil {
 		return "", err
@@ -254,7 +257,7 @@ func getUserIdByEmail() (string, error) {
 		return "", fmt.Errorf("Read the user list faild")
 	}
 
-	if len(userList) == 0{
+	if len(userList) == 0 {
 		return "", fmt.Errorf("found no users for this email")
 	}
 
