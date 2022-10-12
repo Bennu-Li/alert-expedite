@@ -1,32 +1,30 @@
 package main
 
 import (
-	// "github.com/vrischmann/envconfig"
-	"fmt"
-	// "io/ioutil"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
+	"time"
+)
+
+var (
+	appId     = os.Getenv("APP_ID")
+	appSecret = os.Getenv("APP_SECRET")
+	chatId    = os.Getenv("CHAT_ID")
+	userEmail = os.Getenv("USER_EMAIL")
+	// userId    = os.Getenv("USER_ID")
+	interval  = os.Getenv("INTERVAL")  //minutes
 )
 
 func main() {
 	// Get Token
-	appId := "cli_a2f67c62dd22900c"
-	appSecret := "4wKDQFOMKofqRtz3oBEfDhP5yPMPWz8G"
-
 	token, err := genTenantAccessToken(appId, appSecret)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
-	fmt.Println("token: ", token)
-
-	// 从环境变量 USER_ID/CHAT_ID中获取 user_id/chat_id
-	// chatId := "oc_a758de1e0c8bfdba639f342b3d79075a"
-	// userId := "3e55b88e"
-	chatId := os.Getenv("CHAT_ID")
-	userId := os.Getenv("USER_ID")
 
 	//通过chatID获取历史消息 message_id
 	historyMessagesID, err := getHistoryMessage(chatId, token)
@@ -34,8 +32,7 @@ func main() {
 		fmt.Println(err)
 		return
 	}
-	fmt.Println("messageID: ", historyMessagesID)
-
+	fmt.Println("The latest messageID: ", historyMessagesID)
 
 	//查询最新消息已读信息
 	ifRead, err := checkMessageStatus(historyMessagesID, token)
@@ -48,13 +45,16 @@ func main() {
 		return
 	}
 
+	//根据邮箱获取 user_id
+	userId, err := getUserIdByEmail()
+
 	//发送加急消息
 	err = callPhone(historyMessagesID, userId, token)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
-
+	fmt.Printf("Alredy call User %s for message %s \n", userId, historyMessagesID)
 }
 
 func genTenantAccessToken(appId, appSecret string) (string, error) {
@@ -70,7 +70,6 @@ func genTenantAccessToken(appId, appSecret string) (string, error) {
 	req.Header.Add("Content-Type", "application/json")
 	res, err := client.Do(req)
 	if err != nil {
-		// fmt.Println(err)
 		return "", err
 	}
 	defer res.Body.Close()
@@ -91,25 +90,32 @@ func genTenantAccessToken(appId, appSecret string) (string, error) {
 }
 
 func getHistoryMessage(chatId, authToken string, pageToken ...string) (string, error) {
+	cstSh, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		return "", err
+	}
+	now := time.Now().In(cstSh)
+	intervalTime, _ := time.ParseDuration("-" + interval)
+	startTime := fmt.Sprintf("%v", now.Add(intervalTime).Unix())
+	endTime := fmt.Sprintf("%v", now.Unix())
+	// fmt.Println(startTime, endTime)
 	var url string
 	if len(pageToken) == 0 {
-		url = "https://open.feishu.cn/open-apis/im/v1/messages?container_id=" + chatId + "&container_id_type=chat&page_size=50"
+		url = "https://open.feishu.cn/open-apis/im/v1/messages?container_id=" + chatId + "&container_id_type=chat&end_time="+endTime+"&page_size=50&start_time="+startTime
 	} else {
-		url = "https://open.feishu.cn/open-apis/im/v1/messages?container_id=" + chatId + "&container_id_type=chat&page_size=50&page_token=" + pageToken[0]
+		url = "https://open.feishu.cn/open-apis/im/v1/messages?container_id=" + chatId + "&container_id_type=chat&page_size=50&page_token=" + pageToken[0] + "&end_time=" +endTime+ "&start_time=" +startTime
 	}
 
 	method := "GET"
 	client := &http.Client{}
 	req, err := http.NewRequest(method, url, nil)
 	if err != nil {
-		fmt.Println(err)
 		return "", err
 	}
 
 	req.Header.Add("Authorization", "Bearer "+authToken)
 	res, err := client.Do(req)
 	if err != nil {
-		fmt.Println(err)
 		return "", err
 	}
 	defer res.Body.Close()
@@ -124,36 +130,54 @@ func getHistoryMessage(chatId, authToken string, pageToken ...string) (string, e
 
 	messData, ok := jsonData["data"].(map[string]interface{})
 	if !ok {
-		return "", fmt.Errorf("faild1")
+		return "", fmt.Errorf("Read history message data faild")
 	}
 
 	hasMore, _ := messData["has_more"].(bool)
-	// fmt.Println("has more: ", hasMore)
 	if hasMore {
+		fmt.Println("Read the next page")
 		pageToken, _ := messData["page_token"].(string)
-		getHistoryMessage(chatId, authToken, pageToken)
-		return "", nil
+		messageId, err := getHistoryMessage(chatId, authToken, pageToken)
+		return messageId, err
 	}
 
 	messageItems, ok := messData["items"].([]interface{})
 	if !ok {
-		return "", fmt.Errorf("faild2")
+		return "", fmt.Errorf("Read history message items faild")
 	}
 
-	latestItem, ok := messageItems[len(messageItems)-1].(map[string]interface{})
+	messageLength := len(messageItems)
+	if messageLength == 0 {
+		return "", fmt.Errorf("There is no new messages, skip")
+	}
+
+	fmt.Printf("Get %v messages in the past %v \n", messageLength, interval)
+	latestItem, ok := messageItems[messageLength-1].(map[string]interface{})
 	if !ok {
-		return "", fmt.Errorf("faild3")
+		return "", fmt.Errorf("Read the latest history message data faild")
+	}
+
+	// 判断最新消息的发送者是否是机器人
+	sender, ok := latestItem["sender"].(map[string]interface{})
+	if !ok {
+		return "", fmt.Errorf("Read the latest history message sender faild")
+	}
+	senderId, ok := sender["id"].(string)
+	if !ok {
+		return "", fmt.Errorf("Read the latest history message sender ID faild")
+	}
+	if senderId != appId {
+		return "", fmt.Errorf("The latest messages are not sent by bots, skip")
 	}
 
 	messageId, ok := latestItem["message_id"].(string)
 	if !ok {
-		return "", fmt.Errorf("faild4")
+		return "", fmt.Errorf("Read the latest history message ID faild")
 	}
 	return messageId, nil
 }
 
 func checkMessageStatus(messageId, authToken string) (bool, error) {
-	// url := "https://open.feishu.cn/open-apis/im/v1/messages/om_2bb0eee978aa6f37e7b29f7e307508ca/read_users?user_id_type=user_id"
 	url := "https://open.feishu.cn/open-apis/im/v1/messages/" + messageId + "/read_users?user_id_type=user_id"
 	method := "GET"
 	client := &http.Client{}
@@ -178,12 +202,12 @@ func checkMessageStatus(messageId, authToken string) (bool, error) {
 
 	messData, ok := jsonData["data"].(map[string]interface{})
 	if !ok {
-		return false, fmt.Errorf("faild1")
+		return false, fmt.Errorf("Read the latest history message status faild")
 	}
 
 	items, ok := messData["items"].([]interface{})
 	if !ok {
-		return false, fmt.Errorf("faild2")
+		return false, fmt.Errorf("Read the latest history message items status faild")
 	}
 
 	if len(items) == 0 {
@@ -192,6 +216,50 @@ func checkMessageStatus(messageId, authToken string) (bool, error) {
 	}
 
 	return true, nil
+}
+
+func getUserIdByEmail() (string, error) {
+	url := "https://open.feishu.cn/open-apis/contact/v3/users/batch_get_id?user_id_type=user_id"
+	method := "POST"
+	payload := strings.NewReader("{\"emails\": [\"" + userEmail + "\"]}")
+	client := &http.Client {
+	}
+	req, err := http.NewRequest(method, url, payload)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Add("Content-Type", "application/json")
+	req.Header.Add("Authorization", "Bearer t-g104acjfESUALMRB6W37XE6V3YJVWKAKDBWQ4NJ7")
+	res, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer res.Body.Close()
+
+	jsonData := make(map[string]interface{})
+	json.NewDecoder(res.Body).Decode(&jsonData)
+
+	if jsonData["code"].(float64) != 0 {
+		err, _ := jsonData["msg"].(string)
+		return "", fmt.Errorf(err)
+	}
+
+	userData, ok := jsonData["data"].(map[string]interface{})
+	if !ok {
+		return "", fmt.Errorf("Read the user data faild")
+	}
+
+	userList, ok := userData["user_list"].([]interface{})
+	if !ok {
+		return "", fmt.Errorf("Read the user list faild")
+	}
+
+	if len(userList) == 0{
+		return "", fmt.Errorf("found no users for this email")
+	}
+
+	user, _ := userList[0].(map[string]interface{})
+	return user["user_id"].(string), nil
 }
 
 func callPhone(messageId string, userId string, authToken string) error {
@@ -214,11 +282,11 @@ func callPhone(messageId string, userId string, authToken string) error {
 
 	jsonData := make(map[string]interface{})
 	json.NewDecoder(res.Body).Decode(&jsonData)
-	// fmt.Println("body: ", jsonData)
+	// fmt.Println("body: ", jsonData)url := "https://open.feishu.cn/open-apis/contact/v3/users/batch_get_id?user_id_type=user_id"
 	if jsonData["code"].(float64) != 0 {
 		err, _ := jsonData["msg"].(string)
 		return fmt.Errorf(err)
 	}
-	
+
 	return nil
 }

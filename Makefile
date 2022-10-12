@@ -12,4 +12,4 @@ vet: ## Run go vet against code
 	go vet ./...
 
 build: fmt vet
-	CGO_ENABLED=0 go build -o alertphone main.go
+	CGO_ENABLED=0 go build -o alertcall main.go
